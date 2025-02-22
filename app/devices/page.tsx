@@ -124,7 +124,7 @@ export default function DevicesPage() {
           }
         })
 
-        if (Object.values(offlineDetails).some((arr: any[]) => arr.length > 0)) {
+        if (Object.values(offlineDetails).some((arr): arr is any[] => Array.isArray(arr) && arr.length > 0)) {
           newDeviceDetails[store.store_id] = offlineDetails
         }
       })
