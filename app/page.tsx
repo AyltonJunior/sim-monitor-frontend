@@ -1,9 +1,9 @@
 'use client'
 
-import { StatusBadge } from '../components/ui/status-badge'
 import { useEffect, useState } from 'react'
 import { initializeApp } from 'firebase/app'
 import { getDatabase, ref, onValue, set, remove } from 'firebase/database'
+import { Toaster, toast } from 'react-hot-toast'
 
 const firebaseConfig = {
   apiKey: "AIzaSyAl5ZbgWviD4vf-3BjOZB9uQGhxPQT7Dy0",
@@ -18,13 +18,61 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig)
 const database = getDatabase(app)
 
+interface Store {
+  id: string;
+  store_id: string;
+  app_status: string;
+  tv_status: string;
+  timestamp: string;
+  cpu_usage: number;
+  memory_usage: number;
+  disk_usage: number;
+  port_3000: boolean;
+  devices: {
+    dosadoras: Array<{ name: string; online: boolean }>;
+    lavadoras: Array<{ name: string; online: boolean }>;
+    secadoras: Array<{ name: string; online: boolean }>;
+    outros: Array<{ name: string; online: boolean }>;
+  };
+  machine_name: string;
+  restart_message?: string;
+  restart_status?: string;
+}
+
+interface RegionMap {
+  [key: string]: string;
+}
+
+interface GroupedStores {
+  [region: string]: {
+    [state: string]: Store[];
+  };
+}
+
+interface StatusSummary {
+  [key: string]: number;
+}
+
 export default function Home() {
-  const [stores, setStores] = useState<any[]>([])
+  const [stores, setStores] = useState<Store[]>([])
   const [searchQuery, setSearchQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState('all')
-  const [selectedStore, setSelectedStore] = useState<any>(null)
+  const [selectedStore, setSelectedStore] = useState<Store | null>(null)
   const [showDeleteConfirm, setShowDeleteConfirm] = useState<string | null>(null)
   const [showRestartConfirm, setShowRestartConfirm] = useState<string | null>(null)
+  const [expandedRegions, setExpandedRegions] = useState<{[key: string]: boolean}>({
+    'Norte': true,
+    'Nordeste': true,
+    'Centro-Oeste': true,
+    'Sudeste': true,
+    'Sul': true,
+    'Outras': true
+  })
+  
+  const [expandedStates, setExpandedStates] = useState<{[key: string]: boolean}>({})
+  const [showRegionRestartConfirm, setShowRegionRestartConfirm] = useState<string | null>(null)
+  const [showStateRestartConfirm, setShowStateRestartConfirm] = useState<{region: string, state: string} | null>(null)
+  const [playedOfflineAlerts, setPlayedOfflineAlerts] = useState<{[key: string]: boolean}>({})
 
   useEffect(() => {
     // Verifica o status a cada 5 segundos
@@ -54,6 +102,18 @@ export default function Home() {
     }
   }, [])
 
+  // Função para tocar o som de alerta offline
+  const playOfflineAlert = () => {
+    const audio = new Audio('/notification-offline.mp3')
+    audio.play().catch(error => console.log('Erro ao tocar áudio offline:', error))
+  }
+
+  // Função para tocar o som de alerta online
+  const playOnlineAlert = () => {
+    const audio = new Audio('/notification-online.mp3')
+    audio.play().catch(error => console.log('Erro ao tocar áudio online:', error))
+  }
+
   // Função para verificar e atualizar status localmente
   const checkAndUpdateStatus = () => {
     const now = new Date()
@@ -63,11 +123,28 @@ export default function Home() {
         const lastUpdate = new Date(store.timestamp)
         const diffMinutes = (now.getTime() - lastUpdate.getTime()) / (1000 * 60)
         
-        if (diffMinutes > 1 && store.app_status !== 'down') {
+        // Verifica se a loja ficou offline
+        if (diffMinutes > 5 && store.app_status !== 'down' && !playedOfflineAlerts[store.store_id]) {
           console.log(` Servidor ${store.store_id} está offline! Última atualização: ${lastUpdate.toLocaleString()}`)
           console.log(` Tempo sem atualização: ${Math.floor(diffMinutes)} minutos`)
           
-          // Tenta atualizar no Firebase, mas não espera pela resposta
+          // Tocar som e mostrar notificação de offline
+          playOfflineAlert()
+          toast.error(`Loja ${store.store_id} está offline!`, {
+            duration: 5000,
+            position: 'bottom-right',
+            icon: '🔴',
+            style: {
+              background: '#FEE2E2',
+              color: '#991B1B',
+              border: '1px solid #FCA5A5',
+            },
+          })
+
+          // Marcar que já tocamos o alerta para esta loja
+          setPlayedOfflineAlerts(prev => ({ ...prev, [store.store_id]: true }))
+          
+          // Tenta atualizar no Firebase
           set(ref(database, `lojas/${store.id}`), {
             ...store,
             app_status: 'down',
@@ -76,13 +153,38 @@ export default function Home() {
             console.log(' Não foi possível atualizar o Firebase, mas o status foi alterado localmente')
           })
           
-          // Retorna store com status atualizado localmente
           return {
             ...store,
             app_status: 'down',
             timestamp: now.toISOString()
           }
         }
+
+        // Verifica se a loja voltou a ficar online
+        if (store.app_status === 'running' && playedOfflineAlerts[store.store_id]) {
+          console.log(` Servidor ${store.store_id} está online novamente!`)
+          
+          // Tocar som e mostrar notificação de online
+          playOnlineAlert()
+          toast.success(`Loja ${store.store_id} está online novamente!`, {
+            duration: 5000,
+            position: 'bottom-right',
+            icon: '🟢',
+            style: {
+              background: '#ECFDF5',
+              color: '#065F46',
+              border: '1px solid #A7F3D0',
+            },
+          })
+
+          // Resetar o alerta para esta loja
+          setPlayedOfflineAlerts(prev => {
+            const newState = { ...prev }
+            delete newState[store.store_id]
+            return newState
+          })
+        }
+
         return store
       })
     )
@@ -118,7 +220,7 @@ export default function Home() {
   }
 
   // Função para obter o status geral da loja
-  const getStatusDisplay = (store: any) => {
+  const getStatusDisplay = (store: Store) => {
     // Verifica se está inativo por mais de 5 minutos
     const lastUpdate = new Date(store.timestamp).getTime()
     const now = new Date().getTime()
@@ -152,7 +254,7 @@ export default function Home() {
   }
 
   // Função para obter o status da TV
-  const getTVStatus = (store: any) => {
+  const getTVStatus = (store: Store) => {
     const now = new Date()
     const lastUpdate = new Date(store.timestamp)
     const diffMinutes = (now.getTime() - lastUpdate.getTime()) / (1000 * 60)
@@ -171,21 +273,87 @@ export default function Home() {
     }
   }
 
-  // Filtrar lojas baseado na pesquisa e status
-  const filteredStores = stores.filter(store => {
-    const matchesSearch = store.store_id.toLowerCase().includes(searchQuery.toLowerCase())
-    const matchesStatus = statusFilter === 'all' || store.app_status === statusFilter
-    return matchesSearch && matchesStatus
-  })
+  // Função para determinar a região baseada no ID da loja
+  const getRegionFromStoreId = (storeId: string): string => {
+    const stateCode = storeId.substring(0, 2);
+    
+    const regions: RegionMap = {
+      // Norte
+      'AC': 'Norte', 'AP': 'Norte', 'AM': 'Norte', 'PA': 'Norte', 'RO': 'Norte', 'RR': 'Norte', 'TO': 'Norte',
+      // Nordeste
+      'AL': 'Nordeste', 'BA': 'Nordeste', 'CE': 'Nordeste', 'MA': 'Nordeste', 'PB': 'Nordeste',
+      'PE': 'Nordeste', 'PI': 'Nordeste', 'RN': 'Nordeste', 'SE': 'Nordeste',
+      // Centro-Oeste
+      'DF': 'Centro-Oeste', 'GO': 'Centro-Oeste', 'MT': 'Centro-Oeste', 'MS': 'Centro-Oeste',
+      // Sudeste
+      'ES': 'Sudeste', 'MG': 'Sudeste', 'RJ': 'Sudeste', 'SP': 'Sudeste',
+      // Sul
+      'PR': 'Sul', 'RS': 'Sul', 'SC': 'Sul'
+    };
+
+    return regions[stateCode] || 'Outras';
+  };
+
+  // Função para agrupar lojas por região e estado
+  const groupStoresByRegionAndState = (stores: Store[]): GroupedStores => {
+    const grouped = stores.reduce((acc: GroupedStores, store) => {
+      const stateCode = store.store_id.substring(0, 2);
+      const region = getRegionFromStoreId(store.store_id);
+      
+      if (!acc[region]) {
+        acc[region] = {};
+      }
+      if (!acc[region][stateCode]) {
+        acc[region][stateCode] = [];
+      }
+      acc[region][stateCode].push(store);
+      return acc;
+    }, {});
+
+    // Ordenar regiões em uma ordem específica
+    const regionOrder = ['Norte', 'Nordeste', 'Centro-Oeste', 'Sudeste', 'Sul', 'Outras'];
+    return regionOrder.reduce((acc: GroupedStores, region) => {
+      if (grouped[region] && Object.keys(grouped[region]).length > 0) {
+        acc[region] = grouped[region];
+      }
+      return acc;
+    }, {});
+  };
+
+  const toggleRegion = (region: string) => {
+    setExpandedRegions(prev => ({
+      ...prev,
+      [region]: !prev[region]
+    }))
+  }
+
+  const toggleState = (stateCode: string) => {
+    setExpandedStates(prev => ({
+      ...prev,
+      [stateCode]: !prev[stateCode]
+    }))
+  }
+
+  // Filtrar e agrupar lojas
+  const filteredAndGroupedStores = groupStoresByRegionAndState(
+    stores.filter(store => {
+      const matchesSearch = store.store_id.toLowerCase().includes(searchQuery.toLowerCase());
+      const matchesStatus = statusFilter === 'all' || store.app_status === statusFilter;
+      return matchesSearch && matchesStatus;
+    })
+  );
 
   // Calcular o resumo dos status apenas para as lojas filtradas
-  const statusSummary = filteredStores.reduce((acc, store) => {
-    acc[store.app_status] = (acc[store.app_status] || 0) + 1
-    return acc
-  }, {} as Record<string, number>)
+  const statusSummary = Object.values(filteredAndGroupedStores)
+    .flatMap(states => Object.values(states))
+    .flat()
+    .reduce((acc: StatusSummary, store: Store) => {
+      acc[store.app_status] = (acc[store.app_status] || 0) + 1;
+      return acc;
+    }, {} as StatusSummary);
 
   // Função para obter a mensagem de status detalhada
-  const getDetailedStatus = (store: any) => {
+  const getDetailedStatus = (store: Store) => {
     const lastUpdate = new Date(store.timestamp).getTime()
     const now = new Date().getTime()
     const fiveMinutes = 5 * 60 * 1000
@@ -221,31 +389,96 @@ export default function Home() {
     return null
   }
 
+  // Função para obter o resumo de status das lojas de um estado
+  const getStateStatusSummary = (stores: Store[]) => {
+    const summary = stores.reduce((acc: {[key: string]: number}, store) => {
+      const status = store.app_status === 'running' ? 'active' : 
+                    store.app_status === 'down' ? 'inactive' : 'restarting';
+      acc[status] = (acc[status] || 0) + 1;
+      return acc;
+    }, {});
+
+    return summary;
+  };
+
+  // Função para reiniciar todas as lojas de uma região
+  const handleRegionRestart = async (region: string) => {
+    try {
+      const storesInRegion = Object.values(filteredAndGroupedStores[region])
+        .flat()
+        .filter(store => store.app_status !== 'restarting');
+
+      await Promise.all(
+        storesInRegion.map(store => 
+          set(ref(database, `lojas/${store.id}/restart`), true)
+        )
+      );
+
+      console.log(`Solicitação de restart enviada para todas as lojas da região ${region}`);
+      setShowRegionRestartConfirm(null);
+    } catch (error) {
+      console.error('Erro ao solicitar restart em massa:', error);
+    }
+  };
+
+  // Função para reiniciar todas as lojas de um estado
+  const handleStateRestart = async (region: string, stateCode: string) => {
+    try {
+      const storesInState = filteredAndGroupedStores[region][stateCode]
+        .filter(store => store.app_status !== 'restarting');
+
+      await Promise.all(
+        storesInState.map(store => 
+          set(ref(database, `lojas/${store.id}/restart`), true)
+        )
+      );
+
+      console.log(`Solicitação de restart enviada para todas as lojas do estado ${stateCode}`);
+      setShowStateRestartConfirm(null);
+    } catch (error) {
+      console.error('Erro ao solicitar restart em massa:', error);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-gray-50 p-8">
+      <Toaster />
       {/* Título e Status Overview */}
-      <div className="mb-8">
-        <h1 className="text-2xl font-bold text-gray-900">Monitor SIM</h1>
-        <p className="mt-1 text-sm text-gray-500">Sistema Integrado de Monitoramento</p>
+      <div className="mb-8 bg-gradient-to-r from-blue-600 to-blue-800 rounded-lg p-6 shadow-lg">
+        <div className="flex justify-between items-center">
+          <div>
+            <h1 className="text-3xl font-bold text-white">Monitor SIM</h1>
+            <p className="mt-2 text-blue-100">Sistema Integrado de Monitoramento</p>
+          </div>
+          <div className="flex space-x-4">
+            <a
+              href="/devices"
+              className="px-4 py-2 bg-white text-blue-700 rounded-lg hover:bg-blue-50 transition-colors duration-200 flex items-center space-x-2 shadow-lg"
+            >
+              <span>🔌</span>
+              <span>Monitor de Dispositivos</span>
+            </a>
+          </div>
+        </div>
       </div>
 
       {/* Status Overview */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
         {[
-          { status: 'running', label: 'Rodando', count: statusSummary.running || 0 },
-          { status: 'down', label: 'Desligado', count: statusSummary.down || 0 },
-          { status: 'error', label: 'Com Erro', count: statusSummary.error || 0 },
-          { status: 'restarting', label: 'Reiniciando', count: statusSummary.restarting || 0 }
-        ].map(({ status, label, count }) => (
-          <div key={status} className="bg-white p-4 rounded-lg shadow-sm">
-            <div className="text-sm text-gray-500">{label}</div>
-            <div className="mt-1 text-2xl font-semibold text-gray-900">{count}</div>
+          { status: 'running', label: 'Rodando', count: statusSummary.running || 0, color: 'bg-green-500' },
+          { status: 'down', label: 'Desligado', count: statusSummary.down || 0, color: 'bg-red-500' },
+          { status: 'error', label: 'Com Erro', count: statusSummary.error || 0, color: 'bg-yellow-500' },
+          { status: 'restarting', label: 'Reiniciando', count: statusSummary.restarting || 0, color: 'bg-blue-500' }
+        ].map(({ status, label, count, color }) => (
+          <div key={status} className={`${color} p-4 rounded-lg shadow-md text-white`}>
+            <div className="text-sm opacity-90">{label}</div>
+            <div className="mt-1 text-2xl font-bold">{count}</div>
           </div>
         ))}
       </div>
 
       {/* Barra de Pesquisa e Filtro de Status */}
-      <div className="mb-6 flex gap-4">
+      <div className="mb-6 flex gap-4 bg-white p-4 rounded-lg shadow-sm">
         <input
           type="text"
           placeholder="Pesquisar loja..."
@@ -266,161 +499,277 @@ export default function Home() {
         </select>
       </div>
 
-      {/* Grid de Servidores */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-        {filteredStores.length === 0 ? (
+      {/* Grid de Servidores por Região e Estado */}
+      {Object.entries(filteredAndGroupedStores).length === 0 ? (
           <div className="text-center text-gray-500 mt-8">
             Nenhum servidor encontrado
           </div>
         ) : (
-          filteredStores.map((store) => (
+        Object.entries(filteredAndGroupedStores).map(([region, states]) => (
+          <div key={region} className="mb-8">
+            {/* Cabeçalho da Região */}
+            <div className="flex items-center justify-between bg-gradient-to-r from-blue-600 to-blue-800 p-4 rounded-lg shadow-md">
+              <div 
+                className="flex items-center cursor-pointer"
+                onClick={() => toggleRegion(region)}
+              >
+                <span className={`w-6 h-6 flex items-center justify-center text-white transition-transform duration-200 ${
+                  expandedRegions[region] ? 'transform rotate-90' : ''
+                }`}>
+                  ▶
+                </span>
+                <h2 className="text-xl font-semibold text-white flex items-center">
+                  <span className="w-2 h-8 bg-white rounded mr-3"></span>
+                  Região {region}
+                  <span className="ml-2 text-sm text-blue-100">
+                    ({Object.values(states).flat().length} lojas)
+                  </span>
+                </h2>
+              </div>
+
+              {/* Botão de Reinicialização em Massa da Região */}
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setShowRegionRestartConfirm(region);
+                }}
+                className="px-4 py-2 bg-white text-blue-700 rounded-lg hover:bg-blue-50 transition-colors duration-200 flex items-center space-x-2"
+              >
+                <span>⟳</span>
+                <span>Reiniciar Região</span>
+              </button>
+            </div>
+
+            {/* Estados dentro da Região */}
+            <div className={`pl-8 transition-all duration-300 ${
+              expandedRegions[region] 
+                ? 'opacity-100 max-h-[10000px]' 
+                : 'opacity-0 max-h-0 overflow-hidden'
+            }`}>
+              {Object.entries(states).map(([stateCode, storesList]) => (
+                <div key={stateCode} className="mt-4">
+                  {/* Cabeçalho do Estado */}
+                  <div 
+                    className="flex items-center justify-between bg-white p-4 rounded-lg shadow-sm hover:shadow-md transition-all duration-200"
+                  >
+                    <div className="flex items-center cursor-pointer" onClick={() => toggleState(stateCode)}>
+                      <span className={`w-5 h-5 flex items-center justify-center text-gray-500 transition-transform duration-200 ${
+                        expandedStates[stateCode] ? 'transform rotate-90' : ''
+                      }`}>
+                        ▶
+                      </span>
+                      <h3 className="text-lg font-medium text-gray-700 flex items-center">
+                        <span className="w-1 h-6 bg-gray-300 rounded mr-3"></span>
+                        {stateCode}
+                        <span className="ml-2 text-sm text-gray-500">
+                          ({storesList.length} lojas)
+                        </span>
+                      </h3>
+                    </div>
+
+                    <div className="flex items-center space-x-4">
+                      {/* Status Summary */}
+                      <div className="flex items-center space-x-3">
+                        {(() => {
+                          const summary = getStateStatusSummary(storesList);
+                          return (
+                            <>
+                              {summary.active > 0 && (
+                                <div className="flex items-center">
+                                  <span className="w-2 h-2 rounded-full bg-green-500 mr-1"></span>
+                                  <span className="text-sm text-green-600">{summary.active}</span>
+                                </div>
+                              )}
+                              {summary.inactive > 0 && (
+                                <div className="flex items-center">
+                                  <span className="w-2 h-2 rounded-full bg-red-500 mr-1"></span>
+                                  <span className="text-sm text-red-600">{summary.inactive}</span>
+                                </div>
+                              )}
+                              {summary.restarting > 0 && (
+                                <div className="flex items-center">
+                                  <span className="w-2 h-2 rounded-full bg-blue-500 mr-1"></span>
+                                  <span className="text-sm text-blue-600">{summary.restarting}</span>
+                                </div>
+                              )}
+                            </>
+                          );
+                        })()}
+                      </div>
+
+                      {/* Botão de Reinicialização em Massa do Estado */}
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setShowStateRestartConfirm({ region, state: stateCode });
+                        }}
+                        className="px-3 py-1.5 bg-blue-50 text-blue-700 rounded-lg hover:bg-blue-100 transition-colors duration-200 flex items-center space-x-1 text-sm"
+                      >
+                        <span>⟳</span>
+                        <span>Reiniciar Estado</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Cards das Lojas do Estado */}
+                  <div className={`grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mt-4 pl-8 transition-all duration-300 ${
+                    expandedStates[stateCode] 
+                      ? 'opacity-100 max-h-[5000px]' 
+                      : 'opacity-0 max-h-0 overflow-hidden'
+                  }`}>
+                    {storesList.map((store: Store) => (
             <div 
               key={store.id} 
-              className="bg-white p-6 rounded-xl shadow-sm hover:shadow-md transition-all duration-200 cursor-pointer border border-gray-100"
+                        className="bg-white p-6 rounded-xl shadow-sm hover:shadow-md transition-all duration-200 cursor-pointer border border-gray-100"
               onClick={() => setSelectedStore(store)}
             >
-              {/* Header with Status */}
-              <div className="flex items-center justify-between mb-4">
-                <div className="flex items-center space-x-3">
-                  <div className={`w-2.5 h-2.5 rounded-full ${
-                    store.app_status === 'running' ? 'bg-green-500' : 'bg-red-500'
-                  } animate-pulse`}></div>
-                  <h3 className="text-lg font-semibold text-gray-900">Loja {store.store_id}</h3>
+                        {/* Header with Status */}
+                        <div className="flex items-center justify-between mb-4">
+                          <div className="flex items-center space-x-3">
+                            <div className={`w-2.5 h-2.5 rounded-full ${
+                              store.app_status === 'running' ? 'bg-green-500' : 'bg-red-500'
+                            } animate-pulse`}></div>
+                            <h3 className="text-lg font-semibold text-gray-900">Loja {store.store_id}</h3>
+                          </div>
+                          <div className="flex items-center space-x-2">
+                            <span className={`px-3 py-1 text-xs font-medium rounded-full ${
+                              store.app_status === 'running' 
+                                ? 'bg-green-50 text-green-700 border border-green-100' 
+                                : 'bg-red-50 text-red-700 border border-red-100'
+                            }`}>
+                              {store.app_status === 'running' ? 'Ativo' : 'Inativo'}
+                </span>
+                          </div>
+              </div>
+
+                        {/* Restart Status Message */}
+                        {store.restart_message && (
+                          <div className="mb-4 p-3 bg-blue-50 border border-blue-100 rounded-lg">
+                            <p className="text-sm text-blue-700 font-medium">
+                              <span className="mr-2">⟳</span>
+                              {store.restart_message}
+                            </p>
+                          </div>
+                        )}
+
+                        {/* Machine Info & TV Status */}
+                        <div className="flex items-center justify-between mb-4">
+                          <p className="text-sm text-gray-600 font-medium">{store.machine_name}</p>
+                          <div className="flex items-center space-x-2">
+                            <span className="text-sm text-gray-500">TV:</span>
+                            <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
+                              (new Date().getTime() - new Date(store.timestamp).getTime()) / (1000 * 60) > 1 || store.app_status === 'down'
+                                ? 'bg-red-50 text-red-700 border border-red-100'
+                                : store.tv_status === 'running' 
+                                  ? 'bg-green-50 text-green-700 border border-green-100' 
+                                  : 'bg-red-50 text-red-700 border border-red-100'
+                            }`}>
+                              {(new Date().getTime() - new Date(store.timestamp).getTime()) / (1000 * 60) > 1 || store.app_status === 'down'
+                                ? 'Offline'
+                                : store.tv_status === 'running' ? 'Online' : 'Offline'}
+                </span>
+                          </div>
+              </div>
+
+                        {/* System Metrics */}
+                        <div className="grid grid-cols-3 gap-3 mb-4">
+                          <div className="p-2 bg-gray-50 rounded-lg">
+                            <div className="text-xs text-gray-500 mb-1">CPU</div>
+                            <div className={`text-sm font-semibold ${
+                              store.cpu_usage > 90 ? 'text-red-600' :
+                              store.cpu_usage > 70 ? 'text-yellow-600' :
+                              'text-green-600'
+                            }`}>
+                              {store.cpu_usage}%
                 </div>
-                <div className="flex items-center space-x-2">
-                  <span className={`px-3 py-1 text-xs font-medium rounded-full ${
-                    store.app_status === 'running' 
-                      ? 'bg-green-50 text-green-700 border border-green-100' 
-                      : 'bg-red-50 text-red-700 border border-red-100'
-                  }`}>
-                    {store.app_status === 'running' ? 'Ativo' : 'Inativo'}
-                  </span>
+                </div>
+                          <div className="p-2 bg-gray-50 rounded-lg">
+                            <div className="text-xs text-gray-500 mb-1">RAM</div>
+                            <div className={`text-sm font-semibold ${
+                              store.memory_usage > 90 ? 'text-red-600' :
+                              store.memory_usage > 70 ? 'text-yellow-600' :
+                              'text-green-600'
+                            }`}>
+                              {store.memory_usage}%
+                            </div>
+                          </div>
+                          <div className="p-2 bg-gray-50 rounded-lg">
+                            <div className="text-xs text-gray-500 mb-1">HD</div>
+                            <div className={`text-sm font-semibold ${
+                              store.disk_usage > 90 ? 'text-red-600' :
+                              store.disk_usage > 70 ? 'text-yellow-600' :
+                              'text-green-600'
+                            }`}>
+                              {store.disk_usage}%
+                            </div>
                 </div>
               </div>
 
-              {/* Restart Status Message */}
-              {store.restart_message && (
-                <div className="mb-4 p-3 bg-blue-50 border border-blue-100 rounded-lg">
-                  <p className="text-sm text-blue-700 font-medium">
-                    <span className="mr-2">⟳</span>
-                    {store.restart_message}
-                  </p>
-                </div>
-              )}
+                        {/* Port Status */}
+                        <div className="mb-4">
+                          <div className="flex items-center space-x-2">
+                            <span className={`w-2 h-2 rounded-full ${store.port_3000 ? 'bg-green-500' : 'bg-red-500'}`}></span>
+                            <span className="text-sm text-gray-600">
+                              Porta 3000: {store.port_3000 ? 'Ativa' : 'Inativa'}
+                    </span>
+                          </div>
+                        </div>
 
-              {/* Machine Info & TV Status */}
-              <div className="flex items-center justify-between mb-4">
-                <p className="text-sm text-gray-600 font-medium">{store.machine_name}</p>
-                <div className="flex items-center space-x-2">
-                  <span className="text-sm text-gray-500">TV:</span>
-                  <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
-                    (new Date().getTime() - new Date(store.timestamp).getTime()) / (1000 * 60) > 1 || store.app_status === 'down'
-                      ? 'bg-red-50 text-red-700 border border-red-100'
-                      : store.tv_status === 'running' 
-                        ? 'bg-green-50 text-green-700 border border-green-100' 
-                        : 'bg-red-50 text-red-700 border border-red-100'
-                  }`}>
-                    {(new Date().getTime() - new Date(store.timestamp).getTime()) / (1000 * 60) > 1 || store.app_status === 'down'
-                      ? 'Offline'
-                      : store.tv_status === 'running' ? 'Online' : 'Offline'}
-                  </span>
+                        {/* Devices Status */}
+                        <div className="grid grid-cols-2 gap-3">
+                          <div className="space-y-1">
+                            <div className="text-xs font-medium text-gray-500 mb-1">Dosadoras</div>
+                            <div className="flex space-x-1">
+                              {store.devices?.dosadoras?.map((device: any, i: number) => (
+                                <span key={device.name} className={`w-2 h-2 rounded-full ${device.online ? 'bg-green-500' : 'bg-red-500'}`} 
+                                      title={device.name}></span>
+                  ))}
                 </div>
-              </div>
+                          </div>
+                          <div className="space-y-1">
+                            <div className="text-xs font-medium text-gray-500 mb-1">Lavadoras</div>
+                            <div className="flex space-x-1">
+                  {store.devices?.lavadoras?.map((device: any, i: number) => (
+                                <span key={device.name} className={`w-2 h-2 rounded-full ${device.online ? 'bg-green-500' : 'bg-red-500'}`}
+                                      title={device.name}></span>
+                  ))}
+                </div>
+                          </div>
+                          <div className="space-y-1">
+                            <div className="text-xs font-medium text-gray-500 mb-1">Secadoras</div>
+                            <div className="flex space-x-1">
+                  {store.devices?.secadoras?.map((device: any, i: number) => (
+                                <span key={device.name} className={`w-2 h-2 rounded-full ${device.online ? 'bg-green-500' : 'bg-red-500'}`}
+                                      title={device.name}></span>
+                  ))}
+                </div>
+                          </div>
+                          <div className="space-y-1">
+                            <div className="text-xs font-medium text-gray-500 mb-1">Outros</div>
+                            <div className="flex space-x-1">
+                  {store.devices?.outros?.map((device: any, i: number) => (
+                                <span key={device.name} className={`w-2 h-2 rounded-full ${device.online ? 'bg-green-500' : 'bg-red-500'}`}
+                                      title={device.name}></span>
+                  ))}
+                </div>
+                          </div>
+                        </div>
 
-              {/* System Metrics */}
-              <div className="grid grid-cols-3 gap-3 mb-4">
-                <div className="p-2 bg-gray-50 rounded-lg">
-                  <div className="text-xs text-gray-500 mb-1">CPU</div>
-                  <div className={`text-sm font-semibold ${
-                    store.cpu_usage > 90 ? 'text-red-600' :
-                    store.cpu_usage > 70 ? 'text-yellow-600' :
-                    'text-green-600'
-                  }`}>
-                    {store.cpu_usage}%
-                  </div>
-                </div>
-                <div className="p-2 bg-gray-50 rounded-lg">
-                  <div className="text-xs text-gray-500 mb-1">RAM</div>
-                  <div className={`text-sm font-semibold ${
-                    store.memory_usage > 90 ? 'text-red-600' :
-                    store.memory_usage > 70 ? 'text-yellow-600' :
-                    'text-green-600'
-                  }`}>
-                    {store.memory_usage}%
-                  </div>
-                </div>
-                <div className="p-2 bg-gray-50 rounded-lg">
-                  <div className="text-xs text-gray-500 mb-1">HD</div>
-                  <div className={`text-sm font-semibold ${
-                    store.disk_usage > 90 ? 'text-red-600' :
-                    store.disk_usage > 70 ? 'text-yellow-600' :
-                    'text-green-600'
-                  }`}>
-                    {store.disk_usage}%
-                  </div>
-                </div>
-              </div>
-
-              {/* Port Status */}
-              <div className="mb-4">
-                <div className="flex items-center space-x-2">
-                  <span className={`w-2 h-2 rounded-full ${store.port_3000 ? 'bg-green-500' : 'bg-red-500'}`}></span>
-                  <span className="text-sm text-gray-600">
-                    Porta 3000: {store.port_3000 ? 'Ativa' : 'Inativa'}
-                  </span>
-                </div>
-              </div>
-
-              {/* Devices Status */}
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1">
-                  <div className="text-xs font-medium text-gray-500 mb-1">Dosadoras</div>
-                  <div className="flex space-x-1">
-                    {store.devices?.dosadoras?.map((device: any, i: number) => (
-                      <span key={device.name} className={`w-2 h-2 rounded-full ${device.online ? 'bg-green-500' : 'bg-red-500'}`} 
-                            title={device.name}></span>
+                        {/* Last Update */}
+                        <div className="mt-4 pt-3 border-t border-gray-100">
+                          <div className="text-xs text-gray-500">
+                            Última atualização: {new Date(store.timestamp).toLocaleString()}
+                          </div>
+                        </div>
+                      </div>
                     ))}
                   </div>
                 </div>
-                <div className="space-y-1">
-                  <div className="text-xs font-medium text-gray-500 mb-1">Lavadoras</div>
-                  <div className="flex space-x-1">
-                    {store.devices?.lavadoras?.map((device: any, i: number) => (
-                      <span key={device.name} className={`w-2 h-2 rounded-full ${device.online ? 'bg-green-500' : 'bg-red-500'}`}
-                            title={device.name}></span>
-                    ))}
-                  </div>
-                </div>
-                <div className="space-y-1">
-                  <div className="text-xs font-medium text-gray-500 mb-1">Secadoras</div>
-                  <div className="flex space-x-1">
-                    {store.devices?.secadoras?.map((device: any, i: number) => (
-                      <span key={device.name} className={`w-2 h-2 rounded-full ${device.online ? 'bg-green-500' : 'bg-red-500'}`}
-                            title={device.name}></span>
-                    ))}
-                  </div>
-                </div>
-                <div className="space-y-1">
-                  <div className="text-xs font-medium text-gray-500 mb-1">Outros</div>
-                  <div className="flex space-x-1">
-                    {store.devices?.outros?.map((device: any, i: number) => (
-                      <span key={device.name} className={`w-2 h-2 rounded-full ${device.online ? 'bg-green-500' : 'bg-red-500'}`}
-                            title={device.name}></span>
-                    ))}
-                  </div>
-                </div>
-              </div>
-
-              {/* Last Update */}
-              <div className="mt-4 pt-3 border-t border-gray-100">
-                <div className="text-xs text-gray-500">
-                  Última atualização: {new Date(store.timestamp).toLocaleString()}
-                </div>
+              ))}
               </div>
             </div>
           ))
         )}
-      </div>
 
       {/* Modal de Detalhes */}
       {selectedStore && (
@@ -652,6 +1001,60 @@ export default function Home() {
                 className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600"
               >
                 Reiniciar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal de Confirmação de Reinicialização em Massa da Região */}
+      {showRegionRestartConfirm && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[60]">
+          <div className="bg-white rounded-lg shadow-xl p-6 max-w-md w-full mx-4">
+            <h3 className="text-lg font-semibold text-gray-900 mb-4">Confirmar Reinicialização em Massa</h3>
+            <p className="text-gray-600 mb-6">
+              Tem certeza que deseja reiniciar todas as lojas da região {showRegionRestartConfirm}? 
+              Esta ação afetará {Object.values(filteredAndGroupedStores[showRegionRestartConfirm]).flat().length} lojas.
+            </p>
+            <div className="flex justify-end space-x-3">
+              <button
+                onClick={() => setShowRegionRestartConfirm(null)}
+                className="px-4 py-2 text-gray-600 hover:text-gray-800"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={() => handleRegionRestart(showRegionRestartConfirm)}
+                className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600"
+              >
+                Confirmar Reinicialização
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal de Confirmação de Reinicialização em Massa do Estado */}
+      {showStateRestartConfirm && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[60]">
+          <div className="bg-white rounded-lg shadow-xl p-6 max-w-md w-full mx-4">
+            <h3 className="text-lg font-semibold text-gray-900 mb-4">Confirmar Reinicialização em Massa</h3>
+            <p className="text-gray-600 mb-6">
+              Tem certeza que deseja reiniciar todas as lojas do estado {showStateRestartConfirm.state}? 
+              Esta ação afetará {filteredAndGroupedStores[showStateRestartConfirm.region][showStateRestartConfirm.state].length} lojas.
+            </p>
+            <div className="flex justify-end space-x-3">
+              <button
+                onClick={() => setShowStateRestartConfirm(null)}
+                className="px-4 py-2 text-gray-600 hover:text-gray-800"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={() => handleStateRestart(showStateRestartConfirm.region, showStateRestartConfirm.state)}
+                className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600"
+              >
+                Confirmar Reinicialização
               </button>
             </div>
           </div>
